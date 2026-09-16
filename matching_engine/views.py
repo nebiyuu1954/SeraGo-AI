@@ -907,6 +907,55 @@ def application_scores_batch(request):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  RESUME: PDF → profile fields (called by the .NET backend)
+# ══════════════════════════════════════════════════════════════════════
+
+@extend_schema(
+    tags=["Resume"],
+    summary="Extract profile fields from a resume PDF",
+    description=(
+        "Reads a text-based resume PDF and returns whatever profile fields "
+        "it can find. The .NET backend calls this with a short-lived "
+        "presigned R2 URL for the talent's private resume. Requires "
+        "X-Api-Key.\n\n"
+        "EVERY field is optional: anything the parser is unsure about comes "
+        "back null so the user fills it in by hand. Nothing is invented. An "
+        "image-only (scanned) PDF returns zero characters and all-null "
+        "fields rather than an error, so the caller can show a plain "
+        "\"we couldn't read your resume\" message."
+    ),
+    examples=[
+        OpenApiExample(
+            "Parse resume",
+            value={"resumeUrl": "https://<account>.r2.cloudflarestorage.com/"
+                                 "<bucket>/resumes/<userId>/20260916_120000_cv.pdf"
+                                 "?X-Amz-Algorithm=AWS4-HMAC-SHA256&..."},
+        )
+    ],
+    responses={200: OpenApiResponse(description="Extracted profile fields")},
+)
+@csrf_exempt
+@require_POST
+def parse_resume(request):
+    """Extract profile fields from a resume PDF at a (presigned) URL.
+
+    Parse-only and stateless: nothing is written. The talent reviews the
+    fields and saves them through the normal profile endpoint.
+    """
+    from .services.resume_parser import parse_resume_url
+
+    body = _parse_json_body(request)
+    url = str(body.get("resumeUrl") or "").strip()
+    if not url:
+        return JsonResponse(
+            {"success": False, "profile": None, "error": "resumeUrl is required"},
+            status=400,
+        )
+
+    return JsonResponse(parse_resume_url(url))
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  READ: Health check
 # ══════════════════════════════════════════════════════════════════════
 
