@@ -4,6 +4,7 @@ Security middleware for SeraGo-AI.
 - ApiKeyMiddleware: Validates X-Api-Key header on webhook endpoints.
 - RateLimitMiddleware: Simple in-memory rate limiter for sensitive endpoints.
 - RequestLoggingMiddleware: Logs every request with timing.
+- DebugRequestMiddleware: Temporary debug logging for malformed HTTP requests.
 """
 
 import logging
@@ -15,6 +16,7 @@ from django.conf import settings
 from django.http import JsonResponse
 
 logger = logging.getLogger("serago_ai.security")
+debug_logger = logging.getLogger("serago_ai.debug")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -30,23 +32,36 @@ _PROTECTED_PREFIXES = (
     # Batch read endpoints used by .NET to annotate pages
     "/api/matching/scores/",
     "/api/matching/application-scores/",
+    # Resume parsing — called by .NET with a presigned R2 URL for a private
+    # resume. Without this entry the endpoint would be OPEN to the internet.
+    "/api/matching/parse-resume",
 )
 
-# Paths that are always public (no API key needed).
+# Paths that are always public (no API key, no CSRF concern).
+# NOTE: everything here short-circuits the API-key check in __call__ before
+# `requires_auth` is computed, so a path must not appear in BOTH tuples — the
+# entry below wins and silently disables the key check.
 _PUBLIC_PATHS = (
     "/api/matching/health",
     "/api/matching/docs",
     "/api/matching/redoc",
     "/api/matching/schema",
     "/admin/",
+    "/api/ai/health",
 )
 
 
 class ApiKeyMiddleware:
-    """Validate X-Api-Key on protected webhook endpoints.
+    """Validate X-Api-Key on protected webhook/endpoint paths.
 
-    The .NET backend sends this header with every webhook/batch call.
+    The .NET backend sends this header with every webhook/batch/parse call.
+    The AI classify endpoint is also protected by this middleware when
+    MATCHING_API_KEY is configured (it must stay OUT of _PUBLIC_PATHS for
+    that to hold — that tuple short-circuits before this check runs).
     """
+
+    # AI service paths that Django calls from the .NET backend via X-Api-Key.
+    _AI_CLASSIFY_PATH = "/api/ai/classify"
 
     def __init__(self, get_response):
         self.get_response = get_response
@@ -57,8 +72,11 @@ class ApiKeyMiddleware:
             if request.path.startswith(path):
                 return self.get_response(request)
 
-        # Check if this path requires API key auth
-        requires_auth = any(request.path.startswith(p) for p in _PROTECTED_PREFIXES)
+        # AI classify is machine-to-machine (X-Api-Key), not a browser form.
+        requires_auth = (
+            any(request.path.startswith(p) for p in _PROTECTED_PREFIXES)
+            or request.path == self._AI_CLASSIFY_PATH
+        )
 
         if requires_auth:
             expected_key = getattr(settings, "MATCHING_API_KEY", "")
@@ -167,6 +185,47 @@ class RateLimitMiddleware:
 # ══════════════════════════════════════════════════════════════════════
 #  Request Logging
 # ══════════════════════════════════════════════════════════════════════
+
+
+class DebugRequestMiddleware:
+    """Temporary debug middleware to capture malformed HTTP requests.
+
+    Logs the raw request line / first bytes seen by Django before the HTTP
+    parser rejects them (e.g. 'Bad request syntax'). This is for local
+    debugging only and should not be left enabled in production.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        meta = getattr(request, "META", {})
+        method = meta.get("REQUEST_METHOD", "")
+        path = meta.get("PATH_INFO", "")
+        protocol = meta.get("SERVER_PROTOCOL", "")
+        body_preview = b""
+
+        try:
+            body = request.body
+            if isinstance(body, (bytes, bytearray)):
+                body_preview = bytes(body)[:200]
+            else:
+                body_preview = str(body).encode("utf-8", errors="replace")[:200]
+        except Exception as exc:
+            body_preview = str(exc).encode("utf-8", errors="replace")[:200]
+
+        debug_logger.debug(
+            "DEBUG_HTTP_IN %(METHOD)s %(PATH)s %(PROTOCOL)s | body_bytes=%(LEN)d | body_head=%(BODY)s",
+            {
+                "METHOD": method,
+                "PATH": path,
+                "PROTOCOL": protocol,
+                "LEN": len(body_preview),
+                "BODY": body_preview,
+            },
+        )
+
+        return self.get_response(request)
 
 
 class RequestLoggingMiddleware:
