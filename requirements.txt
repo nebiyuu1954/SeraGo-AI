@@ -15,3 +15,10 @@ numpy>=1.24
 djangorestframework>=3.14
 drf-spectacular>=0.27
 
+# LLM token counting (accurate local estimate for OpenAI-compatible models)
+tiktoken>=0.7
+
+# Resume parsing — PDF text extraction (MIT licensed; do NOT swap for
+# PyMuPDF/fitz, which is AGPL)
+pdfplumber>=0.11
+
