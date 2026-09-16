@@ -97,25 +97,89 @@ WSGI_APPLICATION = "serago_ai.wsgi.application"
 
 
 # ── Database ──────────────────────────────────────────────────────────
-# Uses the SAME PostgreSQL database as the .NET backend, but Django
-# manages its own tables (matching_engine_*, ai_service_*).
-# Set DB_* env vars to point at the shared Neon database.
+# "default" is the SeraGo-AI database (its own PostgreSQL DB — set via
+# ConnectionStrings__DefaultConnection, the same .NET-style env name the
+# backend uses, or via individual DB_* vars).
+# "sectors" is an optional read-only alias for the .NET backend's DB,
+# which owns the canonical "Sectors" table the classifier reads live (no sync).
 
-DATABASES = {
-    "default": {
-        "ENGINE": os.environ.get("DB_ENGINE", "django.db.backends.sqlite3"),
-        "NAME": os.environ.get("DB_NAME", str(BASE_DIR / "db.sqlite3")),
-        "USER": os.environ.get("DB_USER", ""),
-        "PASSWORD": os.environ.get("DB_PASSWORD", ""),
-        "HOST": os.environ.get("DB_HOST", ""),
-        "PORT": os.environ.get("DB_PORT", ""),
-        "OPTIONS": {},
+def _db_from_npgsql(value: str) -> dict:
+    """Parse a postgresql:// URI or Npgsql key=value string into Django DB settings."""
+    value = value.strip()
+    if value.startswith(("postgresql://", "postgres://")):
+        from urllib.parse import parse_qs, unquote, urlsplit
+        u = urlsplit(value)
+        db = {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": u.path.lstrip("/") or "",
+            "USER": unquote(u.username or ""),
+            "PASSWORD": unquote(u.password or ""),
+            "HOST": u.hostname or "",
+            "PORT": str(u.port or ""),
+            "OPTIONS": {},
+        }
+        qs = parse_qs(u.query)
+        if qs.get("sslmode"):
+            db["OPTIONS"]["sslmode"] = qs["sslmode"][0]
+        return db
+
+    db = {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": "", "USER": "", "PASSWORD": "", "HOST": "", "PORT": "", "OPTIONS": {},
     }
-}
+    for pair in value.split(";"):
+        if "=" not in pair:
+            continue
+        key, val = pair.split("=", 1)
+        key, val = key.strip().lower(), val.strip()
+        if not val:
+            continue
+        if key == "host":
+            db["HOST"] = val
+        elif key == "database":
+            db["NAME"] = val
+        elif key == "username":
+            db["USER"] = val
+        elif key == "password":
+            db["PASSWORD"] = val
+        elif key == "port":
+            db["PORT"] = val
+        elif key in ("ssl mode", "sslmode"):
+            db["OPTIONS"]["sslmode"] = val.lower()
+    return db
 
-# Neon requires SSL — add sslmode=require for PostgreSQL
+
+_ai_connection_string = os.environ.get("ConnectionStrings__DefaultConnection", "").strip()
+if _ai_connection_string:
+    DATABASES = {"default": _db_from_npgsql(_ai_connection_string)}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": os.environ.get("DB_ENGINE", "django.db.backends.sqlite3"),
+            "NAME": os.environ.get("DB_NAME", str(BASE_DIR / "db.sqlite3")),
+            "USER": os.environ.get("DB_USER", ""),
+            "PASSWORD": os.environ.get("DB_PASSWORD", ""),
+            "HOST": os.environ.get("DB_HOST", ""),
+            "PORT": os.environ.get("DB_PORT", ""),
+            "OPTIONS": {},
+        }
+    }
+
+# Neon requires SSL — default sslmode=require for PostgreSQL
 if DATABASES["default"]["ENGINE"] == "django.db.backends.postgresql":
-    DATABASES["default"]["OPTIONS"]["sslmode"] = os.environ.get("DB_SSLMODE", "require")
+    DATABASES["default"]["OPTIONS"].setdefault("sslmode", os.environ.get("DB_SSLMODE", "require"))
+
+# Read-only "sectors" alias → the .NET backend's DB (owns "Sectors"). Optional.
+if os.environ.get("SECTORS_DB_HOST"):
+    DATABASES["sectors"] = {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.environ.get("SECTORS_DB_NAME", ""),
+        "USER": os.environ.get("SECTORS_DB_USER", ""),
+        "PASSWORD": os.environ.get("SECTORS_DB_PASSWORD", ""),
+        "HOST": os.environ.get("SECTORS_DB_HOST", ""),
+        "PORT": os.environ.get("SECTORS_DB_PORT", ""),
+        "OPTIONS": {"sslmode": os.environ.get("SECTORS_DB_SSLMODE", "require")},
+    }
 
 
 # ── Password validation ───────────────────────────────────────────────
@@ -194,9 +258,24 @@ LOGGING = {
             "level": "INFO",
             "propagate": False,
         },
+        "ai_service.classifier": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "ai_service.views": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
         "serago_ai.security": {
             "handlers": ["console"],
             "level": "INFO",
+            "propagate": False,
+        },
+        "serago_ai.debug": {
+            "handlers": ["console"],
+            "level": "DEBUG",
             "propagate": False,
         },
     },
@@ -234,6 +313,18 @@ if not MATCHING_API_KEY and not DEBUG:
         stacklevel=1,
     )
 
+
+# ── AI / LLM provider ───────────────────────────────────────────────
+# Groq (OpenAI-compat) is the default LLM for AI classification.
+# When GROQ_API_KEY (or GROQ_CONSOLE_API_KEY, the name the .NET backend
+# uses) is set the ai_service can call the LLM directly. When it is absent
+# in production, classify calls raise a clear error at startup / request
+# time rather than failing silently.
+GROQ_API_KEY = (
+    os.environ.get("GROQ_API_KEY", "").strip()
+    or os.environ.get("GROQ_CONSOLE_API_KEY", "").strip()
+)
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
 
 # ── Django REST Framework ─────────────────────────────────────────────
 REST_FRAMEWORK = {
