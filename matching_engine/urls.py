@@ -26,6 +26,9 @@ urlpatterns = [
     path("scores/batch", views.scores_batch, name="scores-batch"),
     path("application-scores/batch", views.application_scores_batch, name="application-scores-batch"),
 
+    # Resume → profile fields (called by .NET with a presigned R2 URL)
+    path("parse-resume", views.parse_resume, name="parse-resume"),
+
     # Health check
     path("health", views.health, name="health"),
 ]
