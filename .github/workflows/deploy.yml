@@ -1,0 +1,64 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy SeraGo-AI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Rsync source to VPS
+        run: |
+          rsync -avz --delete \
+            --exclude='.env' \
+            --exclude='.venv' \
+            --exclude='venv' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='staticfiles' \
+            --exclude='db.sqlite3' \
+            --exclude='.git' \
+            --exclude='.github' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./ \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/web_app/repos/SeraGo-AI/
+
+      - name: Install deps, migrate, collectstatic
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} '
+            set -e
+            cd /web_app/repos/SeraGo-AI
+            source /web_app/django-ai/venv/bin/activate
+            pip install -r requirements.txt --quiet
+            python manage.py migrate --noinput
+            python manage.py collectstatic --noinput
+            deactivate
+          '
+
+      - name: Restart service
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} '
+            set -e
+            sudo systemctl restart serago-ai
+            echo "Waiting for service to become healthy..."
+            for i in {1..20}; do
+              if curl -sf http://127.0.0.1:8001/api/matching/health > /dev/null 2>&1; then
+                echo "✓ Service healthy after $((i*3)) seconds"
+                exit 0
+              fi
+              sleep 3
+            done
+            echo "✗ Health check failed"
+            sudo systemctl status serago-ai --no-pager
+            exit 1
+          '
