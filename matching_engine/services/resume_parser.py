@@ -79,6 +79,8 @@ _SECTIONS = (
         r"^(experience|work experience|professional experience|employment|"
         r"employment history|work history|career history|relevant experience)\b",
         re.I)),
+    ("projects", re.compile(
+        r"^(projects|personal projects|academic projects|key projects)\b", re.I)),
     ("education", re.compile(
         r"^(education|educational background|academic background|academics|"
         r"qualifications|education(\s*(&|and)\s*)training)\b", re.I)),
@@ -409,9 +411,6 @@ def _extract_education(body: list[str]) -> tuple[list[dict], int]:
         current.append(line)
     if current:
         blocks.append(current)
-    # Single-block section: fall back to one entry per year-bearing line.
-    if len(blocks) == 1 and sum(bool(re.search(r"\b(19|20)\d{2}\b", b)) for b in blocks[0]) > 1:
-        blocks = [[b] for b in blocks[0]]
 
     rows: list[dict] = []
     skipped = 0
