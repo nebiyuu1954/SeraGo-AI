@@ -7,7 +7,7 @@ from typing import Any
 from django.db import connections, transaction
 from django.db.utils import OperationalError
 
-from ai_service.groq_client import GroqClient, GroqError
+from ai_service.ai_client import AiClient, AiError
 from ai_service.models import AiClassificationLog, AiClassificationRaw
 from ai_service.schema import (
     AiClassificationParseError,
@@ -123,7 +123,7 @@ def _resolve_sector_by_slug(
 
 
 def _build_request_payload(system: str, user: str, model: str) -> dict[str, Any]:
-    """Reconstruct the exact request payload sent to Groq, for audit logging."""
+    """Reconstruct the exact request payload sent to the AI, for audit logging."""
     return {
         "model": model,
         "messages": [
@@ -221,7 +221,7 @@ def _log_classification(
     return log
 
 
-def classify_jobs(request: ClassifyRequest, groq: GroqClient) -> list[ClassifyJobResult]:
+def classify_jobs(request: ClassifyRequest, ai_client: AiClient) -> list[ClassifyJobResult]:
     """Classify one-to-many jobs via the LLM.
 
     Each job is classified independently: a failure or uncategorization for one
@@ -229,12 +229,12 @@ def classify_jobs(request: ClassifyRequest, groq: GroqClient) -> list[ClassifyJo
     the result, not as an exception.
 
     Every classify attempt also writes an `AiClassificationRaw` + `AiClassificationLog`
-    row so the exact Groq request/response and the parsed result are persisted for
+    row so the exact AI request/response and the parsed result are persisted for
     audit and debugging.
     """
     sectors = _sector_list_for_prompt()
     system = _build_system_prompt(sectors)
-    model = groq.model
+    model = ai_client.model
 
     results: list[ClassifyJobResult] = []
 
@@ -276,11 +276,11 @@ def classify_jobs(request: ClassifyRequest, groq: GroqClient) -> list[ClassifyJo
         try:
             user = _build_user_prompt(item)
             request_payload = _build_request_payload(system, user, model)
-            parsed, response_payload = groq.chat_json_with_raw(system, user, timeout_seconds=60)
+            parsed, response_payload = ai_client.chat_json_with_raw(system, user, timeout_seconds=60)
             parsed = parse_ai_classification(parsed)
 
-        except GroqError as exc:
-            logger.warning("Groq failed for job %s: %s", item.job_id, exc)
+        except AiError as exc:
+            logger.warning("AI failed for job %s: %s", item.job_id, exc)
             error = str(exc)
 
         except AiClassificationParseError as exc:

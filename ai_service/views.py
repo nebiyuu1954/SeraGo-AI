@@ -12,17 +12,17 @@ from django.views.decorators.csrf import csrf_exempt
 
 from ai_service.schema import ClassifyRequest, ClassifyJobResult, parse_ai_classification
 from ai_service.services.classifier import ClassifierServiceError, classify_jobs
-from ai_service.groq_client import GroqClient, GroqError
+from ai_service.ai_client import AiClient, AiError
 
 logger = logging.getLogger("ai_service.views")
 
 
-def _ensure_groq() -> GroqClient:
-    """Lazily construct the Groq client. Raises GroqError when not configured."""
+def _ensure_ai() -> AiClient:
+    """Lazily construct the AI client. Raises AiError when not configured."""
     try:
-        return GroqClient()
-    except GroqError as exc:
-        logger.error("Groq client unavailable: %s", exc)
+        return AiClient()
+    except AiError as exc:
+        logger.error("AI client unavailable: %s", exc)
         raise ClassifierServiceError("AI provider is not configured") from exc
 
 
@@ -91,7 +91,7 @@ def classify(request):
         return JsonResponse({"error": str(exc)}, status=503)
 
     try:
-        groq = _ensure_groq()
+        ai_client = _ensure_ai()
     except ClassifierServiceError as exc:
         return JsonResponse({"error": str(exc)}, status=503)
 
@@ -105,5 +105,5 @@ def classify(request):
             request.body[:2000],
         )
 
-    results = classify_jobs(classify_request, groq)
+    results = classify_jobs(classify_request, ai_client)
     return JsonResponse({"results": [r.to_dict() for r in results]})

@@ -624,6 +624,141 @@ def _fields_found(profile: dict) -> int:
     )
 
 
+def _extract_fields_ai(text: str, sectors: list[str]) -> dict | None:
+    """Extract fields using the AI client."""
+    from ai_service.ai_client import AiClient
+
+    schema = """{
+  "headline": "string or null",
+  "about": "string (html <p> tags, merge broken lines) or null",
+  "skills": ["string (clean single technologies, split items like 'HTML/CSS' into two strings)"],
+  "experience": [
+    {
+      "company": "string",
+      "title": "string (job role only, do NOT use locations like cities)",
+      "startDate": "YYYY-MM-DD",
+      "endDate": "YYYY-MM-DD (use today's date for 'Present')",
+      "description": "string (html <p> tags, merge sentences that wrap across lines)"
+    }
+  ],
+  "education": [
+    {
+      "level": "HighSchool|Certificate|Bachelors|Masters|PhD",
+      "institution": "string",
+      "degree": "string",
+      "gpa": "string or null",
+      "startYear": "YYYY",
+      "endYear": "YYYY"
+    }
+  ],
+  "currentProfession": "string (job role only) or null",
+  "currentIndustry": "string (must be from the sector list) or null",
+  "experienceLevel": "Entry|Junior|Mid|Senior|Lead or null",
+  "yearsOfExperience": "integer or null"
+}"""
+
+    system_prompt = f"""You are an expert resume parsing AI. Extract the candidate's details from the provided resume text.
+Return ONLY a valid JSON object matching this exact schema and follow the inline instructions:
+{schema}
+
+- Sector list for currentIndustry: {", ".join(sectors)}
+- If a field is missing, use null.
+- Education entries only require institution and year; set others to null if missing.
+
+EXAMPLE INPUT:
+John Doe
+Software Engineer
+About: I love coding.
+Skills: Python, HTML/CSS
+Experience:
+Apple Inc
+01/2020 - Present
+- Wrote code
+Education:
+MIT 
+BSc Computer Science 2016-2020
+Coursera 
+Frontend Certificate 2021
+
+EXAMPLE OUTPUT:
+{{
+  "headline": "Software Engineer",
+  "about": "<p>I love coding.</p>",
+  "skills": ["Python", "HTML", "CSS"],
+  "experience": [
+    {{
+      "company": "Apple Inc",
+      "title": "Software Engineer",
+      "startDate": "2020-01-01",
+      "endDate": "{date.today().isoformat()}",
+      "description": "<p>- Wrote code</p>"
+    }}
+  ],
+  "education": [
+    {{
+      "level": "Bachelors",
+      "institution": "MIT",
+      "degree": "BSc Computer Science",
+      "gpa": null,
+      "startYear": "2016",
+      "endYear": "2020"
+    }},
+    {{
+      "level": "Certificate",
+      "institution": "Coursera",
+      "degree": "Frontend Certificate",
+      "gpa": null,
+      "startYear": "2021",
+      "endYear": "2021"
+    }}
+  ],
+  "currentProfession": "Software Engineer",
+  "currentIndustry": "Technology",
+  "experienceLevel": "Mid",
+  "yearsOfExperience": 6
+}}
+"""
+    try:
+        client = AiClient()
+        parsed = client.chat_json(system_prompt, text, timeout_seconds=150)
+        
+        education = parsed.get("education") or []
+        if isinstance(education, list):
+            for edu in education:
+                if isinstance(edu, dict):
+                    lvl = str(edu.get("level") or "").lower()
+                    if "bachelor" in lvl:
+                        edu["level"] = "Bachelors"
+                    elif "master" in lvl:
+                        edu["level"] = "Masters"
+                    elif "certif" in lvl:
+                        edu["level"] = "Certificate"
+
+        experience = parsed.get("experience") or []
+        if isinstance(experience, list):
+            for exp in experience:
+                if isinstance(exp, dict) and str(exp.get("endDate")).lower() == "present":
+                    exp["endDate"] = date.today().isoformat()
+
+        # Ensure base keys exist with safe types
+        return {
+            "headline": parsed.get("headline"),
+            "about": parsed.get("about"),
+            "skills": parsed.get("skills") or [],
+            "experience": experience,
+            "education": education,
+            "currentProfession": parsed.get("currentProfession"),
+            "currentIndustry": parsed.get("currentIndustry"),
+            "experienceLevel": parsed.get("experienceLevel"),
+            "yearsOfExperience": parsed.get("yearsOfExperience"),
+            "skippedExperience": 0, 
+            "skippedEducation": 0,
+        }
+    except Exception as exc:
+        logger.warning("AI resume extraction failed: %s", exc)
+        return None
+
+
 def parse_resume_url(url: str) -> dict:
     """Download, read and parse a resume PDF.
 
@@ -667,7 +802,13 @@ def parse_resume_url(url: str) -> dict:
         }
 
     sectors = _load_sector_names()
-    profile = extract_fields(text, sectors)
+    
+    # Try AI first, fallback to regex rules
+    profile = _extract_fields_ai(text, sectors)
+    if not profile:
+        logger.info("Falling back to regex resume parser")
+        profile = extract_fields(text, sectors)
+        
     found = _fields_found(profile)
 
     logger.info(
