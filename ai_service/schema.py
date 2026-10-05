@@ -61,9 +61,18 @@ class ClassifyJobResult:
     suggested_sectors: list[dict[str, str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        suggested = None
+        if self.suggested_sectors:
+            suggested = []
+            for s in self.suggested_sectors:
+                s_dict = dict(s)
+                if s_dict.get("sectorId"):
+                    s_dict["sectorId"] = str(s_dict["sectorId"])
+                suggested.append(s_dict)
+                
         return {
-            "jobId": self.job_id,
-            "sectorId": self.sector_id,
+            "jobId": str(self.job_id) if self.job_id else None,
+            "sectorId": str(self.sector_id) if self.sector_id else None,
             "sectorName": self.sector_name,
             "sectorSlug": self.sector_slug,
             "subSectorName": self.sub_sector_name,
@@ -72,7 +81,7 @@ class ClassifyJobResult:
             "reasoning": self.reasoning,
             "uncategorized": self.uncategorized,
             "error": self.error,
-            "suggestedSectors": self.suggested_sectors,
+            "suggestedSectors": suggested,
         }
 
 
