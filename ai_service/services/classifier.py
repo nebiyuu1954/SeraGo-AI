@@ -25,8 +25,8 @@ class ClassifierServiceError(Exception):
     """Raised when the classifier can't even start (e.g. no LLM configured)."""
 
 
-def _sector_list_for_prompt() -> list[tuple[str, str, str]]:
-    """Return the real active sectors as (id, slug, name) tuples from the shared DB.
+def _sector_list_for_prompt() -> list[tuple[str, str, str, list[str]]]:
+    """Return the real active sectors as (id, slug, name, aliases) tuples from the shared DB.
 
     This is the canonical vocabulary the LLM must choose from. Loaded once per
     classify call so the prompt always reflects the live sector list.
@@ -44,27 +44,37 @@ def _sector_list_for_prompt() -> list[tuple[str, str, str]]:
         with connections[alias].cursor() as cursor:
             cursor.execute(
                 """
-                SELECT "Id", "Slug", "Name"
-                FROM "Sectors"
-                WHERE "IsActive" = TRUE
-                ORDER BY "Name"
+                SELECT s."Id", s."Slug", s."Name", a."Alias"
+                FROM "Sectors" s
+                LEFT JOIN "SectorAliases" a ON s."Id" = a."SectorId"
+                WHERE s."IsActive" = TRUE
+                ORDER BY s."Name"
                 """
             )
             rows = cursor.fetchall()
+            
+            sectors_map = {}
+            for row in rows:
+                sector_id, slug, name, sector_alias = str(row[0]), str(row[1]), str(row[2]), row[3]
+                if sector_id not in sectors_map:
+                    sectors_map[sector_id] = (sector_id, slug, name, [])
+                if sector_alias:
+                    sectors_map[sector_id][3].append(str(sector_alias))
+                    
+            return list(sectors_map.values())
     except OperationalError as exc:
         logger.error("Could not load the sector list from the shared DB: %s", exc)
         raise ClassifierServiceError("Sector list unavailable from the shared database") from exc
 
-    return [(str(row[0]), str(row[1]), str(row[2])) for row in rows]
 
-
-def _build_system_prompt(sectors: list[tuple[str, str, str]]) -> str:
+def _build_system_prompt(sectors: list[tuple[str, str, str, list[str]]]) -> str:
     """Build the system prompt listing the real canonical sectors."""
     lines = [
-        "LOW CATEGORICAL TABLE — choose ONE slug from below:",
+        "LOW CATEGORICAL TABLE — choose ONE slug from below. Each sector has aliases indicating the type of jobs that fall under it:",
     ]
-    for sector_id, slug, name in sectors:
-        lines.append(f"  {slug}   {name}   (id: {sector_id})")
+    for sector_id, slug, name, aliases in sectors:
+        alias_str = f" (Includes: {', '.join(aliases)})" if aliases else ""
+        lines.append(f"  {slug}   {name}{alias_str}   (id: {sector_id})")
 
     lines.append(
         "  (if none of the above fit the job, set \"uncategorized\": true "
@@ -99,7 +109,7 @@ def _build_user_prompt(item: ClassifyJobRequestItem) -> str:
 
 def _resolve_sector_by_slug(
     slug: str | None,
-    sectors: list[tuple[str, str, str]],
+    sectors: list[tuple[str, str, str, list[str]]],
 ) -> dict[str, Any]:
     """Resolve a canonical sector by slug against the real sector list.
 
@@ -110,7 +120,7 @@ def _resolve_sector_by_slug(
         return {"sectorId": None, "sectorName": None, "sectorSlug": None}
 
     slug = slug.strip()
-    for sector_id, sector_slug, sector_name in sectors:
+    for sector_id, sector_slug, sector_name, _aliases in sectors:
         if sector_slug == slug:
             return {
                 "sectorId": sector_id,
