@@ -105,8 +105,14 @@ def classify(request):
             request.body[:2000],
         )
 
-    results = classify_jobs(classify_request, ai_client)
-    return JsonResponse({"results": [r.to_dict() for r in results]})
+    try:
+        results = classify_jobs(classify_request, ai_client)
+        return JsonResponse({"results": [r.to_dict() for r in results]})
+    except Exception as exc:
+        import traceback
+        error_details = traceback.format_exc()
+        logger.error("Unhandled exception in classify: %s", error_details)
+        return JsonResponse({"error": f"Internal Server Error: {str(exc)}\n\nTraceback:\n{error_details}"}, status=500)
 
 @csrf_exempt
 def get_log(request, log_id):
