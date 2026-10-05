@@ -107,3 +107,23 @@ def classify(request):
 
     results = classify_jobs(classify_request, ai_client)
     return JsonResponse({"results": [r.to_dict() for r in results]})
+
+@csrf_exempt
+def get_log(request, log_id):
+    """GET /api/ai/classify/log/{log_id} — Fetch the AI reasoning for a specific classification log."""
+    from ai_service.models import AiClassificationLog
+    try:
+        log = AiClassificationLog.objects.get(id=log_id)
+        return JsonResponse({
+            "id": str(log.id),
+            "jobId": str(log.job_id),
+            "jobTitle": log.job_title,
+            "reasoning": log.reasoning,
+            "error": log.error,
+            "uncategorized": log.is_uncategorized,
+            "sectorSlug": log.sector_slug,
+            "createdAt": log.created_at.isoformat()
+        })
+    except AiClassificationLog.DoesNotExist:
+        return JsonResponse({"error": "Log not found"}, status=404)
+
