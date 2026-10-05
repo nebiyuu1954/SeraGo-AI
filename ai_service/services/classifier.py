@@ -45,8 +45,8 @@ def _sector_list_for_prompt() -> list[tuple[str, str, str, list[str]]]:
             cursor.execute(
                 """
                 SELECT s."Id", s."Slug", s."Name", a."Alias"
-                FROM "Sectors" s
-                LEFT JOIN "SectorAliases" a ON s."Id" = a."SectorId"
+                FROM public."Sectors" s
+                LEFT JOIN public."SectorAliases" a ON s."Id" = a."SectorId"
                 WHERE s."IsActive" = TRUE
                 ORDER BY s."Name"
                 """
