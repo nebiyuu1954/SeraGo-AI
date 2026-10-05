@@ -58,6 +58,7 @@ class ClassifyJobResult:
     reasoning: str | None
     uncategorized: bool
     error: str | None
+    suggested_sectors: list[dict[str, str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +72,7 @@ class ClassifyJobResult:
             "reasoning": self.reasoning,
             "uncategorized": self.uncategorized,
             "error": self.error,
+            "suggestedSectors": self.suggested_sectors,
         }
 
 
@@ -113,6 +115,11 @@ def parse_ai_classification(raw: Any, uncategorized_default: bool = False) -> di
     reasoning = raw.get("reasoning")
     if reasoning is not None:
         reasoning = str(reasoning).strip() or None
+        
+    suggested_sectors_raw = raw.get("suggestedSectors")
+    suggested_sectors = []
+    if isinstance(suggested_sectors_raw, list):
+        suggested_sectors = [str(s).strip() for s in suggested_sectors_raw if s]
 
     return {
         "sectorSlug": sector_slug,
@@ -120,4 +127,5 @@ def parse_ai_classification(raw: Any, uncategorized_default: bool = False) -> di
         "confidence": confidence,
         "reasoning": reasoning,
         "uncategorized": uncategorized,
+        "suggestedSectors": suggested_sectors,
     }

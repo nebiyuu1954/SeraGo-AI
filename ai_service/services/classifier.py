@@ -103,7 +103,10 @@ def _build_user_prompt(item: ClassifyJobRequestItem) -> str:
         + _job_text(item)
         + "\n\nReturn a JSON object with: sectorId, sectorSlug, sectorName, "
         "confidence, reasoning, uncategorized.\n"
-        "sectorId must be the canonical sector id from the list above, or null."
+        "sectorId must be the canonical sector id from the list above, or null.\n"
+        "If you are not highly confident and mark uncategorized as true, "
+        "you MUST also include a 'suggestedSectors' key with a list of up to 2 "
+        "closest matching sector slugs from the canonical list to help the human reviewer."
     )
 
 
@@ -334,6 +337,13 @@ def classify_jobs(request: ClassifyRequest, ai_client: AiClient) -> list[Classif
             )
             continue
 
+        suggested_sectors = []
+        if parsed.get("suggestedSectors"):
+            for slug in parsed["suggestedSectors"]:
+                res = _resolve_sector_by_slug(slug, sectors)
+                if res["sectorId"]:
+                    suggested_sectors.append(res)
+                    
         if parsed["uncategorized"] or parsed["sectorSlug"] is None:
             results.append(
                 ClassifyJobResult(
@@ -347,6 +357,7 @@ def classify_jobs(request: ClassifyRequest, ai_client: AiClient) -> list[Classif
                     reasoning=parsed["reasoning"],
                     uncategorized=True,
                     error=None,
+                    suggested_sectors=suggested_sectors,
                 )
             )
             continue
@@ -364,6 +375,7 @@ def classify_jobs(request: ClassifyRequest, ai_client: AiClient) -> list[Classif
                 reasoning=parsed["reasoning"],
                 uncategorized=False,
                 error=None,
+                suggested_sectors=suggested_sectors,
             )
         )
 
