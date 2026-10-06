@@ -25,7 +25,7 @@ class ClassifierServiceError(Exception):
     """Raised when the classifier can't even start (e.g. no LLM configured)."""
 
 
-def _sector_list_for_prompt() -> list[tuple[str, str, str, list[str]]]:
+def _sector_list_for_prompt() -> tuple[list[tuple[str, str, str, list[str]]], list[str]]:
     """Return the real active sectors as (id, slug, name, aliases) tuples from the shared DB.
 
     This is the canonical vocabulary the LLM must choose from. Loaded once per
@@ -61,25 +61,42 @@ def _sector_list_for_prompt() -> list[tuple[str, str, str, list[str]]]:
                 if sector_alias:
                     sectors_map[sector_id][3].append(str(sector_alias))
                     
-            return list(sectors_map.values())
+            # Also fetch dynamic rules from the core scraper app
+            rules = []
+            try:
+                cursor.execute('SELECT "rule_text" FROM public."core_sectorclassificationrule" WHERE "is_active" = TRUE')
+                rules = [str(r[0]) for r in cursor.fetchall()]
+            except Exception as rules_exc:
+                logger.warning("Could not load dynamic classification rules: %s", rules_exc)
+                    
+            return list(sectors_map.values()), rules
     except OperationalError as exc:
         logger.error("Could not load the sector list from the shared DB: %s", exc)
         raise ClassifierServiceError("Sector list unavailable from the shared database") from exc
 
 
-def _build_system_prompt(sectors: list[tuple[str, str, str, list[str]]]) -> str:
+def _build_system_prompt(sectors: list[tuple[str, str, str, list[str]]], rules: list[str]) -> str:
     """Build the system prompt listing the real canonical sectors."""
     lines = [
-        "LOW CATEGORICAL TABLE — choose ONE slug from below. Each sector has aliases indicating the type of jobs that fall under it:",
+        "You are an expert HR and recruitment classifier. Your task is to accurately map a job posting to exactly ONE of the following canonical sectors.",
+        "Choose the most specific and accurate sector based on the primary duties of the job.",
+        "",
     ]
+    
+    if rules:
+        lines.append("CRITICAL RULES:")
+        for rule in rules:
+            lines.append(f"- {rule}")
+        lines.append("")
+
+    lines.append("AVAILABLE SECTORS (Choose ONE slug from below):")
     for sector_id, slug, name, aliases in sectors:
         alias_str = f" (Includes: {', '.join(aliases)})" if aliases else ""
-        lines.append(f"  {slug}   {name}{alias_str}   (id: {sector_id})")
+        lines.append(f"  - {slug} : {name}{alias_str} (id: {sector_id})")
 
     lines.append(
-        "  (if none of the above fit the job, set \"uncategorized\": true "
-        "and leave sectorSlug/sectorName/sectorId null — do NOT invent a "
-        "sector slug or id)"
+        "\nIf the job clearly does not fit into ANY of the above sectors, set \"uncategorized\": true "
+        "and leave sectorSlug/sectorName/sectorId null. DO NOT invent a sector slug or id."
     )
 
     return "\n".join(lines)
@@ -101,8 +118,10 @@ def _build_user_prompt(item: ClassifyJobRequestItem) -> str:
     return (
         "Classify this job into exactly one sector from the list above.\n\n"
         + _job_text(item)
-        + "\n\nReturn a JSON object with: sectorId, sectorSlug, sectorName, "
-        "confidence, reasoning, uncategorized.\n"
+        + "\n\nReturn a JSON object with EXACTLY these keys IN THIS ORDER: "
+        "'reasoning', 'sectorId', 'sectorSlug', 'sectorName', "
+        "'confidence', 'uncategorized'.\n"
+        "You MUST provide your step-by-step reasoning FIRST before selecting the sectorId/sectorSlug. "
         "sectorId must be the canonical sector id from the list above, or null.\n"
         "If you are not highly confident and mark uncategorized as true, "
         "you MUST also include a 'suggestedSectors' key with a list of up to 2 "
@@ -245,8 +264,8 @@ def classify_jobs(request: ClassifyRequest, ai_client: AiClient) -> list[Classif
     row so the exact AI request/response and the parsed result are persisted for
     audit and debugging.
     """
-    sectors = _sector_list_for_prompt()
-    system = _build_system_prompt(sectors)
+    sectors, rules = _sector_list_for_prompt()
+    system = _build_system_prompt(sectors, rules)
     model = ai_client.model
 
     results: list[ClassifyJobResult] = []
