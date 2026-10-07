@@ -308,7 +308,7 @@ def classify_jobs(request: ClassifyRequest, ai_client: AiClient) -> list[Classif
         try:
             user = _build_user_prompt(item)
             request_payload = _build_request_payload(system, user, model)
-            parsed, response_payload = ai_client.chat_json_with_raw(system, user, timeout_seconds=60)
+            parsed, response_payload = ai_client.chat_json_with_raw(system, user, timeout_seconds=600)
             parsed = parse_ai_classification(parsed)
 
         except AiError as exc:
