@@ -878,8 +878,8 @@ def _extract_fields_ai(text: str, sectors: list[str]) -> dict | None:
   "currentProfession": "string (job role only, NEVER a city/location) or null",
   "currentIndustry": "string (must be from the sector list) or null",
   "suggestedSectors": ["string (choose ONLY the 1 single highest/most relevant sector from the sector list for their For You job feed)"],
-  "experienceLevel": "Entry|Junior|Mid|Senior|Lead or null",
-  "yearsOfExperience": "integer or null"
+  "experienceLevel": "Entry|Junior|Mid|Senior|Lead or null (STRICTLY based on total professional work experience years)",
+  "yearsOfExperience": "integer or null (total sum of professional work experience years ONLY. NEVER count university/education years)"
 }"""
 
     system_prompt = f"""You are an expert resume parsing AI. Extract the candidate's details from the provided resume text.
@@ -890,6 +890,7 @@ Return ONLY a valid JSON object matching this exact schema and follow the inline
 - Pick ONLY the 1 single highest/most relevant sector from the sector list for suggestedSectors (to populate their 'For You' job feed).
 - CRITICAL for title and currentProfession: NEVER use city names, locations, or countries (e.g. "Addis Abeba", "Ethiopia", "Nairobi", "Remote") as a job title or currentProfession. If the role header has "Company | City", the title is the candidate's professional headline or role (e.g. "Full Stack Web Developer"), NOT the city.
 - CRITICAL for suggestedSectors and currentIndustry: Select the single most relevant sector based on the candidate's core technical skills, education, and profession (e.g., software engineering, web development, programming, IT belongs to "Technology & IT"). Do NOT choose "Social Science & Community" just because a company name contains "Social" or a university degree contains "Science".
+- CRITICAL for yearsOfExperience and experienceLevel: Count ONLY real professional WORK EXPERIENCE (sum of employment roles in the experience section). NEVER count university degrees, college, or education study periods as years of work experience! For example, if someone studied at university from 2021-2025 and worked from 2025-2026, their work experience is 1 year (Junior), NOT 5 or 6 years (Senior).
 - If a field is missing, use null or empty array.
 - Education entries only require institution and year; set others to null if missing.
 
@@ -900,7 +901,7 @@ About: I love coding.
 Skills: Python, HTML/CSS
 Experience:
 Apple Inc
-01/2020 - Present
+01/2022 - Present
 - Wrote code
 Education:
 MIT 
@@ -917,7 +918,7 @@ EXAMPLE OUTPUT:
     {{
       "company": "Apple Inc",
       "title": "Software Engineer",
-      "startDate": "2020-01-01",
+      "startDate": "2022-01-01",
       "endDate": "{date.today().isoformat()}",
       "description": "<p>- Wrote code</p>"
     }}
@@ -944,7 +945,7 @@ EXAMPLE OUTPUT:
   "currentIndustry": "Technology & IT",
   "suggestedSectors": ["Technology & IT"],
   "experienceLevel": "Mid",
-  "yearsOfExperience": 6
+  "yearsOfExperience": 4
 }}
 """
     try:
@@ -1000,6 +1001,25 @@ EXAMPLE OUTPUT:
         if domain_suggested:
             suggested = domain_suggested
 
+        # Compute real years of professional experience strictly from work experience (NOT education)
+        total_months = 0
+        if isinstance(experience, list):
+            for exp in experience:
+                if isinstance(exp, dict):
+                    s_str = str(exp.get("startDate") or "")
+                    e_str = str(exp.get("endDate") or "")
+                    start = _parse_point(s_str[:7].replace("-", "/")) or _parse_point(s_str)
+                    end = _parse_point(e_str[:7].replace("-", "/")) or _parse_point(e_str)
+                    if start and end and end >= start:
+                        total_months += _months_between(start, end)
+
+        if experience:
+            final_years = (total_months // 12) if total_months >= 12 else (1 if total_months >= 6 else 0)
+            final_level = _experience_level_from_years(final_years)
+        else:
+            final_years = parsed.get("yearsOfExperience")
+            final_level = parsed.get("experienceLevel") or _experience_level_from_years(final_years)
+
         # Ensure base keys exist with safe types
         return {
             "headline": headline,
@@ -1010,8 +1030,8 @@ EXAMPLE OUTPUT:
             "currentProfession": current_profession,
             "currentIndustry": suggested[0] if suggested else curr_ind,
             "suggestedSectors": suggested[:1],
-            "experienceLevel": parsed.get("experienceLevel"),
-            "yearsOfExperience": parsed.get("yearsOfExperience"),
+            "experienceLevel": final_level,
+            "yearsOfExperience": final_years,
             "skippedExperience": 0, 
             "skippedEducation": 0,
         }
