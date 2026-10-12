@@ -475,12 +475,38 @@ def _experience_level_from_years(years: int | None) -> str | None:
 
 # ── Industry (best effort against the shared Sectors table) ────────────
 
+CANONICAL_SECTORS: list[str] = [
+    "Accounting & Finance",
+    "Agriculture & Natural Science",
+    "Banking & Insurance",
+    "Beauty & Grooming",
+    "Business & Administration",
+    "Customer Service & Support",
+    "Design & Creative",
+    "Education & Training",
+    "Engineering & Construction",
+    "Healthcare",
+    "Hospitality & Tourism",
+    "Human Resources",
+    "Legal",
+    "Logistics & Transportation",
+    "Manufacturing & Production",
+    "Media & Communication",
+    "Procurement & Supply Chain",
+    "Sales & Marketing",
+    "Security & Protection",
+    "Skilled & General Labor",
+    "Social Science & Community",
+    "Technology & IT",
+]
+
+
 def _load_sector_names() -> list[str]:
     """Active sector names from the .NET DB's "Sectors" table.
 
     Read through the read-only "sectors" alias, falling back to "default"
-    (same pattern as ai_service.services.classifier). Returns [] when the table
-    cannot be read — industry is best-effort and must never fail a parse.
+    (same pattern as ai_service.services.classifier). Returns CANONICAL_SECTORS when
+    the table cannot be read or is empty.
     """
     alias = "sectors" if "sectors" in connections else "default"
     try:
@@ -488,24 +514,26 @@ def _load_sector_names() -> list[str]:
             cursor.execute(
                 'SELECT "Name" FROM "Sectors" WHERE "IsActive" = TRUE ORDER BY "Name"'
             )
-            return [str(row[0]) for row in cursor.fetchall()]
+            rows = [str(row[0]) for row in cursor.fetchall()]
+            if rows:
+                return rows
     except (OperationalError, Exception) as exc:  # noqa: BLE001 - best effort
         logger.warning("Could not load sectors for industry matching: %s", exc)
-        return []
+    return list(CANONICAL_SECTORS)
 
 
-def _extract_industry(text: str, sectors: list[str]) -> str | None:
-    """Match the resume text against sector names by shared significant words."""
+def _extract_suggested_sectors(text: str, sectors: list[str], max_count: int = 1) -> list[str]:
+    """Score sector names against resume text and return up to max_count top matching sectors (highest first)."""
     if not text or not sectors:
-        return None
+        return []
     words = {
         w for w in re.findall(r"[a-z]{4,}", text.lower())
         if w not in _STOPWORDS
     }
     if not words:
-        return None
+        return []
 
-    best_name, best_score, required = None, 0, 1
+    scored: list[tuple[str, int]] = []
     for name in sectors:
         name_words = {
             w for w in re.findall(r"[a-z]{4,}", name.lower())
@@ -514,16 +542,18 @@ def _extract_industry(text: str, sectors: list[str]) -> str | None:
         if not name_words:
             continue
         score = len(words & name_words)
-        if score > best_score:
-            best_name, best_score = name, score
-            # A one-word sector name ("Healthcare") matches on that word, but a
-            # multi-word one needs at least two, or a single generic word would
-            # decide the category on its own. A wrong industry is worse than
-            # null — the user fills in what the resume doesn't support.
-            required = 1 if len(name_words) == 1 else 2
-    if best_name and best_score >= required:
-        return best_name
-    return None
+        required = 1 if len(name_words) == 1 else 2
+        if score >= required:
+            scored.append((name, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [name for name, _ in scored[:max_count]]
+
+
+def _extract_industry(text: str, sectors: list[str]) -> str | None:
+    """Match the resume text against sector names by shared significant words."""
+    suggested = _extract_suggested_sectors(text, sectors, max_count=1)
+    return suggested[0] if suggested else None
 
 
 _STOPWORDS = {
@@ -597,7 +627,13 @@ def extract_fields(text: str, sectors: list[str] | None = None) -> dict:
         " ".join(row["title"] for row in experience),
         " ".join(row["company"] for row in experience),
     ]))
-    current_industry = _extract_industry(industry_source, sectors or [])
+    all_sectors = sectors or CANONICAL_SECTORS
+    current_industry = _extract_industry(industry_source, all_sectors)
+    suggested_sectors = _extract_suggested_sectors(industry_source, all_sectors, max_count=1)
+    if not suggested_sectors and current_industry:
+        suggested_sectors = [current_industry]
+    else:
+        suggested_sectors = suggested_sectors[:1]
 
     return {
         "headline": headline,
@@ -607,6 +643,7 @@ def extract_fields(text: str, sectors: list[str] | None = None) -> dict:
         "education": education,
         "currentProfession": current_profession,
         "currentIndustry": current_industry,
+        "suggestedSectors": suggested_sectors,
         "experienceLevel": _experience_level_from_years(years),
         "yearsOfExperience": years,
         "skippedExperience": skipped_experience,
@@ -653,6 +690,7 @@ def _extract_fields_ai(text: str, sectors: list[str]) -> dict | None:
   ],
   "currentProfession": "string (job role only) or null",
   "currentIndustry": "string (must be from the sector list) or null",
+  "suggestedSectors": ["string (choose the 1 single highest/most relevant sector from the sector list for their For You job feed)"],
   "experienceLevel": "Entry|Junior|Mid|Senior|Lead or null",
   "yearsOfExperience": "integer or null"
 }"""
@@ -661,8 +699,9 @@ def _extract_fields_ai(text: str, sectors: list[str]) -> dict | None:
 Return ONLY a valid JSON object matching this exact schema and follow the inline instructions:
 {schema}
 
-- Sector list for currentIndustry: {", ".join(sectors)}
-- If a field is missing, use null.
+- Sector list for currentIndustry and suggestedSectors: {", ".join(sectors)}
+- Pick ONLY the 1 single highest/most relevant sector from the sector list for suggestedSectors (to populate their 'For You' job feed).
+- If a field is missing, use null or empty array.
 - Education entries only require institution and year; set others to null if missing.
 
 EXAMPLE INPUT:
@@ -713,7 +752,8 @@ EXAMPLE OUTPUT:
     }}
   ],
   "currentProfession": "Software Engineer",
-  "currentIndustry": "Technology",
+  "currentIndustry": "Technology & IT",
+  "suggestedSectors": ["Technology & IT"],
   "experienceLevel": "Mid",
   "yearsOfExperience": 6
 }}
@@ -740,6 +780,19 @@ EXAMPLE OUTPUT:
                 if isinstance(exp, dict) and str(exp.get("endDate")).lower() == "present":
                     exp["endDate"] = date.today().isoformat()
 
+        raw_sectors = parsed.get("suggestedSectors")
+        suggested: list[str] = []
+        if isinstance(raw_sectors, list):
+            for s in raw_sectors:
+                if isinstance(s, str) and s in sectors and s not in suggested:
+                    suggested.append(s)
+                if len(suggested) >= 1:
+                    break
+
+        curr_ind = parsed.get("currentIndustry")
+        if not suggested and curr_ind and curr_ind in sectors:
+            suggested.append(curr_ind)
+
         # Ensure base keys exist with safe types
         return {
             "headline": parsed.get("headline"),
@@ -749,6 +802,7 @@ EXAMPLE OUTPUT:
             "education": education,
             "currentProfession": parsed.get("currentProfession"),
             "currentIndustry": parsed.get("currentIndustry"),
+            "suggestedSectors": suggested[:1],
             "experienceLevel": parsed.get("experienceLevel"),
             "yearsOfExperience": parsed.get("yearsOfExperience"),
             "skippedExperience": 0, 
@@ -770,6 +824,7 @@ def parse_resume_url(url: str) -> dict:
     empty_profile = {
         "headline": None, "about": None, "skills": [], "experience": [],
         "education": [], "currentProfession": None, "currentIndustry": None,
+        "suggestedSectors": [],
         "experienceLevel": None, "yearsOfExperience": None,
         "skippedExperience": 0, "skippedEducation": 0,
     }
