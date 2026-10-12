@@ -80,7 +80,7 @@ _SECTIONS = (
         r"employment history|work history|career history|relevant experience)\b",
         re.I)),
     ("projects", re.compile(
-        r"^(projects|personal projects|academic projects|key projects)\b", re.I)),
+        r"^(personal\s+|deployed\s+|academic\s+|key\s+|side\s+|selected\s+)*projects\b", re.I)),
     ("education", re.compile(
         r"^(education|educational background|academic background|academics|"
         r"qualifications|education(\s*(&|and)\s*)training)\b", re.I)),
@@ -444,13 +444,26 @@ def _extract_education(body: list[str]) -> tuple[list[dict], int]:
                 blocks.append(current)
                 current = []
             continue
-        # A new institution/degree line right after a year line starts a block.
-        if current and re.search(r"\b(19|20)\d{2}\b", current[-1]) and not re.search(
-                r"\b(19|20)\d{2}\b", line) and re.search(r"[A-Za-z]{3}", line):
-            if _education_level_from_degree(line) or len(line) < 60:
+
+        # A new education block should only start if:
+        # 1. line has an education level keyword (BSc, MSc, etc.) AND current already has a line with a level keyword.
+        # 2. current already has both a level keyword and an institution, and line has a new date range or header.
+        if current:
+            current_has_level = any(_education_level_from_degree(l) for l in current)
+            line_has_level = bool(_education_level_from_degree(line))
+            current_has_years = any(re.search(r"\b(19|20)\d{2}\b", l) for l in current)
+            line_has_years = bool(re.search(r"\b(19|20)\d{2}\b", line))
+
+            if line_has_level and current_has_level:
                 blocks.append(current)
                 current = [line]
                 continue
+            if current_has_level and current_has_years and line_has_years and not line_has_level:
+                if len(current) >= 2:
+                    blocks.append(current)
+                    current = [line]
+                    continue
+
         current.append(line)
     if current:
         blocks.append(current)
@@ -483,9 +496,31 @@ def _extract_education(body: list[str]) -> tuple[list[dict], int]:
                     institution = line
         degree = degree or block[0]
         institution = institution or (degree if degree != block[0] else None)
+
+        # Fallback for single-line education entry e.g. "BSc in Computer Science, Addis Ababa University 2021-2025"
+        if not institution and degree and len(block) == 1:
+            parts = [p.strip() for p in re.split(r",|\s+at\s+|\|", block[0]) if p.strip()]
+            for p in parts:
+                if _education_level_from_degree(p):
+                    degree = p
+                elif re.search(r"[A-Za-z]{3}", p) and not re.search(r"\b(19|20)\d{2}\b", p):
+                    institution = p
+
         if not institution or not degree:
             skipped += 1
             continue
+
+        # Clean trailing dates, locations, and separator pipes from degree
+        cleaned_degree = re.sub(r"\s*[|•·]\s*.*$", "", degree)
+        cleaned_degree = re.sub(r"\s*[-–—]?\s*\b(19|20)\d{2}\b.*$", "", cleaned_degree).strip()
+        if cleaned_degree:
+            degree = cleaned_degree
+
+        # Clean trailing locations, dates, and separator pipes from institution
+        cleaned_inst = re.sub(r"\s*[|•·]\s*.*$", "", institution)
+        cleaned_inst = re.sub(r"\s*[-–—]?\s*\b(19|20)\d{2}\b.*$", "", cleaned_inst).strip()
+        if cleaned_inst:
+            institution = cleaned_inst
 
         rows.append({
             "level": level,
