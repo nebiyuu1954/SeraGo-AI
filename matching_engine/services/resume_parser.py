@@ -128,6 +128,31 @@ _COMPANY_HINTS = re.compile(
 
 _HEADER_SPLIT = re.compile(r"\s+(?:at|@)\s+|\s*[|•·]\s*|\s+[—–]\s+|\s+-\s+|\s*,\s*")
 
+#: Locations that should never be mistaken for a job title or profession.
+_LOCATION_HINTS = re.compile(
+    r"\b(addis\s*abeba|addis\s*ababa|ethiopia|kenya|nairobi|remote|onsite|hybrid|"
+    r"hawassa|bahir\s*dar|dire\s*dawa|mekelle|adama|bishoftu|gondar|jimma|"
+    r"africa|usa|uk|united\s+states)\b",
+    re.I,
+)
+
+
+def _is_location(text: str | None) -> bool:
+    """True if text is predominantly a location (e.g. 'Addis Abeba,Ethiopia')."""
+    if not text:
+        return False
+    cleaned = text.strip().lower()
+    has_location = bool(_LOCATION_HINTS.search(cleaned))
+    if not has_location:
+        return False
+    has_role_words = bool(re.search(
+        r"\b(engineer|developer|manager|lead|director|specialist|officer|analyst|"
+        r"designer|assistant|consultant|coordinator|intern|head|architect|technician|"
+        r"administrator|accountant|writer|editor|trainer|teacher)\b",
+        cleaned,
+    ))
+    return has_location and not has_role_words
+
 
 # ── Text helpers ───────────────────────────────────────────────────────
 
@@ -272,26 +297,44 @@ def _extract_skills(body: list[str]) -> list[str]:
     return found
 
 
-def _split_role_header(header: str) -> tuple[str | None, str | None]:
+def _split_role_header(header: str, headline_fallback: str | None = None) -> tuple[str | None, str | None]:
     """Split a 'Title — Company' style line into (title, company)."""
-    tokens = [t.strip(" .:;-–—") for t in _HEADER_SPLIT.split(header) if t.strip(" .:;-–—")]
-    if not tokens:
+    raw_tokens = [t.strip(" .:;-–—") for t in _HEADER_SPLIT.split(header) if t.strip(" .:;-–—")]
+    if not raw_tokens:
         return (None, None)
+
+    # Separate location tokens so they are never assigned as title or company
+    tokens = [t for t in raw_tokens if not _is_location(t)]
+    if not tokens:
+        tokens = raw_tokens
+
     if len(tokens) == 1:
-        return (_clean(tokens[0]), None)
+        single = tokens[0]
+        if _COMPANY_HINTS.search(single):
+            return (_clean(headline_fallback), _clean(single))
+        return (_clean(single), None)
 
     first, second = tokens[0], tokens[1]
     first_is_company = bool(_COMPANY_HINTS.search(first))
     second_is_company = bool(_COMPANY_HINTS.search(second))
     if first_is_company and not second_is_company:
-        return (_clean(second), _clean(first))
+        title = _clean(second)
+        if _is_location(title) and headline_fallback:
+            title = _clean(headline_fallback)
+        return (title, _clean(first))
     if second_is_company and not first_is_company:
-        return (_clean(first), _clean(second))
+        title = _clean(first)
+        if _is_location(title) and headline_fallback:
+            title = _clean(headline_fallback)
+        return (title, _clean(second))
     # No hint either way: resumes overwhelmingly lead with the job title.
-    return (_clean(first), _clean(second))
+    title = _clean(first)
+    if _is_location(title) and headline_fallback:
+        title = _clean(headline_fallback)
+    return (title, _clean(second))
 
 
-def _extract_experience(body: list[str]) -> tuple[list[dict], int]:
+def _extract_experience(body: list[str], headline_fallback: str | None = None) -> tuple[list[dict], int]:
     """Parse role blocks. Returns (rows, skipped_count).
 
     Every emitted row has all five fields non-empty so it satisfies the form's
@@ -338,7 +381,7 @@ def _extract_experience(body: list[str]) -> tuple[list[dict], int]:
         if end < start:
             end = start
 
-        title, company = _split_role_header(header_text)
+        title, company = _split_role_header(header_text, headline_fallback=headline_fallback)
         if not title or not company:
             skipped += 1
             continue
@@ -522,18 +565,158 @@ def _load_sector_names() -> list[str]:
     return list(CANONICAL_SECTORS)
 
 
+SECTOR_DOMAIN_KEYWORDS: dict[str, list[str]] = {
+    "Technology & IT": [
+        "software", "developer", "programmer", "programming", "web", "frontend", "front-end",
+        "backend", "back-end", "fullstack", "full-stack", "full stack", "engineer", "engineering",
+        "computer", "computing", "code", "coding", "it", "ict", "devops", "cloud", "database",
+        "sql", "python", "javascript", "typescript", "react", "angular", "vue", "node", "django",
+        "dotnet", ".net", "net 8", "c#", "java", "c++", "golang", "php", "html", "css", "api",
+        "rest", "restful", "docker", "kubernetes", "aws", "azure", "git", "linux", "cybersecurity",
+        "network", "sysadmin", "machine learning", "artificial intelligence", "data science",
+        "hilcoe", "microfrontends", "microfrontend", "microservices", "system architect", "tech",
+        "iis", "nginx", "webpack", "monorepo", "mediatr", "dbeaver", "swagger", "postgresql",
+        "postman", "orm", "entity framework", "jwt", "agile", "scrum", "qa automation", "sdk",
+    ],
+    "Accounting & Finance": [
+        "accountant", "accounting", "auditor", "audit", "tax", "taxation", "financial", "finance",
+        "bookkeeper", "bookkeeping", "payroll", "ledger", "cpa", "acca", "ifrs", "gaap", "treasury",
+        "financial analyst", "budget", "cost control", "reconciliation", "accounts payable", "accounts receivable",
+    ],
+    "Banking & Insurance": [
+        "bank", "banking", "credit", "loan", "mortgage", "underwriter", "underwriting", "insurance",
+        "actuary", "actuarial", "claims", "teller", "branch manager", "microfinance", "interest rate",
+        "forex", "risk management", "credit analysis", "liquidity",
+    ],
+    "Healthcare": [
+        "doctor", "physician", "nurse", "nursing", "medical", "medicine", "hospital", "clinic",
+        "clinical", "patient", "pharmacy", "pharmacist", "health", "healthcare", "pediatric",
+        "surgeon", "surgery", "laboratory", "radiology", "dental", "dentist", "therapy", "therapist",
+        "midwife", "pathology", "optometry", "public health", "epidemiology",
+    ],
+    "Engineering & Construction": [
+        "civil engineer", "mechanical engineer", "electrical engineer", "structural engineer",
+        "construction", "contractor", "site engineer", "architect", "architecture", "surveyor",
+        "autocad", "building", "hvac", "plumbing", "quantity surveyor", "draftsman", "structural design",
+        "mep", "concrete", "heavy machinery",
+    ],
+    "Education & Training": [
+        "teacher", "teaching", "lecturer", "professor", "instructor", "pedagogy", "curriculum",
+        "school teacher", "tutor", "tutoring", "education", "trainer", "academic", "principal",
+        "kindergarten", "classroom", "lesson plan", "student assessment", "faculty",
+    ],
+    "Legal": [
+        "lawyer", "attorney", "legal", "paralegal", "advocate", "prosecutor", "judge", "litigation",
+        "solicitor", "juris", "law", "counsel", "compliance officer", "contract law", "court",
+        "arbitration", "intellectual property", "notary",
+    ],
+    "Human Resources": [
+        "human resources", "hr", "recruiter", "recruitment", "talent acquisition", "onboarding",
+        "employee relations", "people operations", "hr manager", "personnel", "talent management",
+        "performance appraisal", "staffing", "labor law",
+    ],
+    "Sales & Marketing": [
+        "sales", "marketing", "advertisement", "advertising", "digital marketing", "seo", "sem",
+        "social media marketing", "brand", "branding", "sales representative", "account executive",
+        "business development", "telemarketing", "b2b", "b2c", "merchandising", "promoter",
+        "lead generation", "market research", "campaign",
+    ],
+    "Design & Creative": [
+        "graphic designer", "ui designer", "ux designer", "ui/ux", "creative director", "animator",
+        "animation", "video editor", "illustrator", "photographer", "fashion designer", "art director",
+        "visual designer", "motion graphics", "figma", "photoshop", "after effects", "typography",
+    ],
+    "Logistics & Transportation": [
+        "logistics", "transport", "transportation", "fleet", "driver", "warehouse", "warehousing",
+        "freight", "cargo", "shipping", "distribution", "customs clearing", "dispatch", "import export",
+        "supply chain coordinator", "transit", "freight forwarding",
+    ],
+    "Procurement & Supply Chain": [
+        "procurement", "purchasing", "supply chain", "sourcing", "vendor management", "inventory control",
+        "buyer", "purchase order", "tender", "supplier evaluation", "material management",
+    ],
+    "Customer Service & Support": [
+        "customer service", "call center", "customer support", "help desk", "client service",
+        "customer care", "receptionist", "front desk", "guest service", "inbound", "outbound", "ticketing",
+    ],
+    "Business & Administration": [
+        "administration", "administrative", "executive assistant", "office manager", "operations manager",
+        "general manager", "management", "secretary", "clerk", "business analyst", "project management",
+        "office administration", "records management", "data entry",
+    ],
+    "Media & Communication": [
+        "journalist", "journalism", "reporter", "news", "editor", "editorial", "broadcasting",
+        "media", "communications", "public relations", "pr specialist", "content creator", "copywriter",
+        "broadcaster", "producer", "press release",
+    ],
+    "Hospitality & Tourism": [
+        "hotel", "hospitality", "restaurant", "waiter", "waitress", "chef", "cook", "culinary",
+        "bartender", "catering", "tourism", "tour guide", "travel agent", "housekeeping", "concierge",
+        "resort", "food and beverage", "guest relations",
+    ],
+    "Manufacturing & Production": [
+        "manufacturing", "factory", "production line", "assembly line", "plant operator",
+        "quality control", "qa/qc", "industrial engineering", "fabrication", "machinist", "cnc",
+        "process engineer", "maintenance engineer",
+    ],
+    "Agriculture & Natural Science": [
+        "agriculture", "agronomist", "agronomy", "farming", "farmer", "crop", "livestock",
+        "veterinary", "veterinarian", "botany", "forestry", "horticulture", "soil science",
+        "biology", "chemist", "chemistry", "environmental science", "irrigation", "agribusiness",
+    ],
+    "Security & Protection": [
+        "security guard", "surveillance", "safety officer", "patrol", "loss prevention",
+        "security officer", "cctv operator", "bodyguard", "access control", "physical security", "fire safety",
+    ],
+    "Beauty & Grooming": [
+        "barber", "hair stylist", "hairdresser", "salon", "spa", "makeup artist", "esthetician",
+        "cosmetology", "beautician", "manicurist", "skincare", "massage therapist",
+    ],
+    "Skilled & General Labor": [
+        "carpenter", "plumber", "electrician", "welder", "mason", "laborer", "cleaner", "janitor",
+        "maintenance technician", "mechanic", "painter", "handyman", "facility maintenance",
+    ],
+    "Social Science & Community": [
+        "social work", "social worker", "community development", "sociology", "humanitarian",
+        "counselor", "counseling", "psychology", "psychologist", "anthropology", "community outreach",
+        "human rights", "child protection", "social welfare", "civil society", "ngo worker", "community mobilization",
+    ],
+}
+
+
 def _extract_suggested_sectors(text: str, sectors: list[str], max_count: int = 1) -> list[str]:
-    """Score sector names against resume text and return up to max_count top matching sectors (highest first)."""
+    """Score sector names against resume text using domain keywords first, then fallback to word matches."""
     if not text or not sectors:
         return []
+    lower_text = text.lower()
+    scored: list[tuple[str, int]] = []
+
+    # 1. High-precision domain ontology keywords
+    for name in sectors:
+        keywords = SECTOR_DOMAIN_KEYWORDS.get(name) or []
+        domain_score = 0
+        for kw in keywords:
+            if " " in kw or "." in kw or "#" in kw or "+" in kw or "-" in kw:
+                if kw in lower_text:
+                    domain_score += 4 if " " in kw else 3
+            else:
+                if re.search(rf"\b{re.escape(kw)}\b", lower_text):
+                    domain_score += 2
+        if domain_score > 0:
+            scored.append((name, domain_score))
+
+    if scored:
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [name for name, _ in scored[:max_count]]
+
+    # 2. Fallback to naive word overlap
     words = {
-        w for w in re.findall(r"[a-z]{4,}", text.lower())
+        w for w in re.findall(r"[a-z]{4,}", lower_text)
         if w not in _STOPWORDS
     }
     if not words:
         return []
 
-    scored: list[tuple[str, int]] = []
     for name in sectors:
         name_words = {
             w for w in re.findall(r"[a-z]{4,}", name.lower())
@@ -551,7 +734,7 @@ def _extract_suggested_sectors(text: str, sectors: list[str], max_count: int = 1
 
 
 def _extract_industry(text: str, sectors: list[str]) -> str | None:
-    """Match the resume text against sector names by shared significant words."""
+    """Match the resume text against sector names by domain ontology or shared words."""
     suggested = _extract_suggested_sectors(text, sectors, max_count=1)
     return suggested[0] if suggested else None
 
@@ -603,12 +786,14 @@ def extract_fields(text: str, sectors: list[str] | None = None) -> dict:
     lines = [ln.rstrip() for ln in (text or "").splitlines()]
     sections = _split_sections(lines)
 
-    experience, skipped_experience = _extract_experience(sections.get("experience", []))
-    education, skipped_education = _extract_education(sections.get("education", []))
-
     headline = _extract_headline(sections.get("headline", []))
     about = _extract_about(sections.get("about", []))
     skills = _extract_skills(sections.get("skills", []))
+
+    experience, skipped_experience = _extract_experience(
+        sections.get("experience", []), headline_fallback=headline
+    )
+    education, skipped_education = _extract_education(sections.get("education", []))
 
     # Total years = sum of the parsed role spans (overlaps are not merged —
     # a slight over-count is preferable to inventing a number).
@@ -621,6 +806,12 @@ def extract_fields(text: str, sectors: list[str] | None = None) -> dict:
     years = (total_months // 12) if experience else None
 
     current_profession = _clean(experience[0]["title"]) if experience else None
+    if (not current_profession or _is_location(current_profession)) and headline:
+        current_profession = headline
+
+    for row in experience:
+        if _is_location(row.get("title")) and headline:
+            row["title"] = headline
 
     industry_source = " ".join(filter(None, [
         headline, current_profession, " ".join(skills),
@@ -628,12 +819,8 @@ def extract_fields(text: str, sectors: list[str] | None = None) -> dict:
         " ".join(row["company"] for row in experience),
     ]))
     all_sectors = sectors or CANONICAL_SECTORS
-    current_industry = _extract_industry(industry_source, all_sectors)
     suggested_sectors = _extract_suggested_sectors(industry_source, all_sectors, max_count=1)
-    if not suggested_sectors and current_industry:
-        suggested_sectors = [current_industry]
-    else:
-        suggested_sectors = suggested_sectors[:1]
+    current_industry = suggested_sectors[0] if suggested_sectors else None
 
     return {
         "headline": headline,
@@ -643,7 +830,7 @@ def extract_fields(text: str, sectors: list[str] | None = None) -> dict:
         "education": education,
         "currentProfession": current_profession,
         "currentIndustry": current_industry,
-        "suggestedSectors": suggested_sectors,
+        "suggestedSectors": suggested_sectors[:1],
         "experienceLevel": _experience_level_from_years(years),
         "yearsOfExperience": years,
         "skippedExperience": skipped_experience,
@@ -672,7 +859,7 @@ def _extract_fields_ai(text: str, sectors: list[str]) -> dict | None:
   "experience": [
     {
       "company": "string",
-      "title": "string (job role only, do NOT use locations like cities)",
+      "title": "string (job role only, NEVER a city/location like 'Addis Abeba')",
       "startDate": "YYYY-MM-DD",
       "endDate": "YYYY-MM-DD (use today's date for 'Present')",
       "description": "string (html <p> tags, merge sentences that wrap across lines)"
@@ -688,9 +875,9 @@ def _extract_fields_ai(text: str, sectors: list[str]) -> dict | None:
       "endYear": "YYYY"
     }
   ],
-  "currentProfession": "string (job role only) or null",
+  "currentProfession": "string (job role only, NEVER a city/location) or null",
   "currentIndustry": "string (must be from the sector list) or null",
-  "suggestedSectors": ["string (choose the 1 single highest/most relevant sector from the sector list for their For You job feed)"],
+  "suggestedSectors": ["string (choose ONLY the 1 single highest/most relevant sector from the sector list for their For You job feed)"],
   "experienceLevel": "Entry|Junior|Mid|Senior|Lead or null",
   "yearsOfExperience": "integer or null"
 }"""
@@ -701,6 +888,8 @@ Return ONLY a valid JSON object matching this exact schema and follow the inline
 
 - Sector list for currentIndustry and suggestedSectors: {", ".join(sectors)}
 - Pick ONLY the 1 single highest/most relevant sector from the sector list for suggestedSectors (to populate their 'For You' job feed).
+- CRITICAL for title and currentProfession: NEVER use city names, locations, or countries (e.g. "Addis Abeba", "Ethiopia", "Nairobi", "Remote") as a job title or currentProfession. If the role header has "Company | City", the title is the candidate's professional headline or role (e.g. "Full Stack Web Developer"), NOT the city.
+- CRITICAL for suggestedSectors and currentIndustry: Select the single most relevant sector based on the candidate's core technical skills, education, and profession (e.g., software engineering, web development, programming, IT belongs to "Technology & IT"). Do NOT choose "Social Science & Community" just because a company name contains "Social" or a university degree contains "Science".
 - If a field is missing, use null or empty array.
 - Education entries only require institution and year; set others to null if missing.
 
@@ -774,11 +963,19 @@ EXAMPLE OUTPUT:
                     elif "certif" in lvl:
                         edu["level"] = "Certificate"
 
+        headline = parsed.get("headline")
+        current_profession = parsed.get("currentProfession")
+        if (not current_profession or _is_location(current_profession)) and headline:
+            current_profession = headline
+
         experience = parsed.get("experience") or []
         if isinstance(experience, list):
             for exp in experience:
-                if isinstance(exp, dict) and str(exp.get("endDate")).lower() == "present":
-                    exp["endDate"] = date.today().isoformat()
+                if isinstance(exp, dict):
+                    if str(exp.get("endDate")).lower() == "present":
+                        exp["endDate"] = date.today().isoformat()
+                    if _is_location(str(exp.get("title") or "")) and headline:
+                        exp["title"] = headline
 
         raw_sectors = parsed.get("suggestedSectors")
         suggested: list[str] = []
@@ -793,15 +990,25 @@ EXAMPLE OUTPUT:
         if not suggested and curr_ind and curr_ind in sectors:
             suggested.append(curr_ind)
 
+        # Validate sector suggestion with high-precision domain keywords
+        text_pool = " ".join(filter(None, [
+            headline, current_profession,
+            " ".join(parsed.get("skills") or []),
+            " ".join(str(e.get("title", "")) for e in experience if isinstance(e, dict)),
+        ]))
+        domain_suggested = _extract_suggested_sectors(text_pool, sectors, max_count=1)
+        if domain_suggested:
+            suggested = domain_suggested
+
         # Ensure base keys exist with safe types
         return {
-            "headline": parsed.get("headline"),
+            "headline": headline,
             "about": parsed.get("about"),
             "skills": parsed.get("skills") or [],
             "experience": experience,
             "education": education,
-            "currentProfession": parsed.get("currentProfession"),
-            "currentIndustry": parsed.get("currentIndustry"),
+            "currentProfession": current_profession,
+            "currentIndustry": suggested[0] if suggested else curr_ind,
             "suggestedSectors": suggested[:1],
             "experienceLevel": parsed.get("experienceLevel"),
             "yearsOfExperience": parsed.get("yearsOfExperience"),
