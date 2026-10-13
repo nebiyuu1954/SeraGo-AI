@@ -12,6 +12,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from ai_service.schema import ClassifyRequest, ClassifyJobResult, parse_ai_classification
 from ai_service.services.classifier import ClassifierServiceError, classify_jobs
+from ai_service.services.cover_letter import CoverLetterRequest, generate_cover_letter
 from ai_service.ai_client import AiClient, AiError
 
 logger = logging.getLogger("ai_service.views")
@@ -91,28 +92,38 @@ def classify(request):
         return JsonResponse({"error": str(exc)}, status=503)
 
     try:
-        ai_client = _ensure_ai()
-    except ClassifierServiceError as exc:
-        return JsonResponse({"error": str(exc)}, status=503)
-
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            "classify ok | method=%s path=%s protocol=%s body_bytes=%d body_head=%r",
-            request.method,
-            request.path,
-            getattr(request.META, "SERVER_PROTOCOL", ""),
-            len(request.body),
-            request.body[:2000],
-        )
-
-    try:
-        results = classify_jobs(classify_request, ai_client)
+        results = classify_jobs(classify_request)
         return JsonResponse({"results": [r.to_dict() for r in results]})
     except Exception as exc:
         import traceback
         error_details = traceback.format_exc()
         logger.error("Unhandled exception in classify: %s", error_details)
         return JsonResponse({"error": f"Internal Server Error: {str(exc)}\n\nTraceback:\n{error_details}"}, status=500)
+
+
+@csrf_exempt
+@require_POST
+def cover_letter(request):
+    """POST /api/ai/cover-letter — generate tailored cover letter via Ollama (Gemini fallback)."""
+    try:
+        raw = request.body
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        payload = _json.loads(raw)
+    except (_json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    try:
+        cl_request = CoverLetterRequest.from_payload(payload)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    try:
+        result = generate_cover_letter(cl_request)
+        return JsonResponse(result.to_dict())
+    except Exception as exc:
+        logger.exception("Cover letter generation failed: %s", exc)
+        return JsonResponse({"error": f"Cover letter generation failed: {exc}"}, status=500)
 
 @csrf_exempt
 def get_log(request, log_id):

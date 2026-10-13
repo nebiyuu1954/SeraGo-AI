@@ -122,17 +122,8 @@ def count_request_tokens(request_payload: dict[str, Any], model: str | None = No
 # ── Provider usage (authoritative) ──────────────────────────────────────
 
 def parse_provider_usage(response_payload: dict[str, Any] | None) -> dict[str, int | None]:
-    """Extract exact token counts from a Groq chat-completions response.
-
-    Returns ``{"prompt_tokens": ..., "completion_tokens": ..., "total_tokens": ...}``
-    with None for any field the provider did not return. These are the counts
-    we store as the source of truth — the model counted them itself.
-    """
+    """Extract exact token counts from any LLM provider response (Groq, Gemini, Ollama, OpenAI)."""
     if not isinstance(response_payload, dict):
-        return {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
-
-    usage = response_payload.get("usage")
-    if not isinstance(usage, dict):
         return {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
 
     def _int_or_none(value: Any) -> int | None:
@@ -141,8 +132,33 @@ def parse_provider_usage(response_payload: dict[str, Any] | None) -> dict[str, i
         except (TypeError, ValueError):
             return None
 
-    return {
-        "prompt_tokens": _int_or_none(usage.get("prompt_tokens")),
-        "completion_tokens": _int_or_none(usage.get("completion_tokens")),
-        "total_tokens": _int_or_none(usage.get("total_tokens")),
-    }
+    # 1. OpenAI / Groq / DeepSeek format
+    usage = response_payload.get("usage")
+    if isinstance(usage, dict):
+        return {
+            "prompt_tokens": _int_or_none(usage.get("prompt_tokens")),
+            "completion_tokens": _int_or_none(usage.get("completion_tokens")),
+            "total_tokens": _int_or_none(usage.get("total_tokens")),
+        }
+
+    # 2. Google Gemini format
+    usage_meta = response_payload.get("usageMetadata")
+    if isinstance(usage_meta, dict):
+        return {
+            "prompt_tokens": _int_or_none(usage_meta.get("promptTokenCount")),
+            "completion_tokens": _int_or_none(usage_meta.get("candidatesTokenCount")),
+            "total_tokens": _int_or_none(usage_meta.get("totalTokenCount")),
+        }
+
+    # 3. Direct Ollama format
+    if "prompt_eval_count" in response_payload or "eval_count" in response_payload:
+        p = _int_or_none(response_payload.get("prompt_eval_count"))
+        c = _int_or_none(response_payload.get("eval_count"))
+        tot = (p or 0) + (c or 0) if (p or c) else None
+        return {
+            "prompt_tokens": p,
+            "completion_tokens": c,
+            "total_tokens": tot,
+        }
+
+    return {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}

@@ -8,6 +8,7 @@ from django.db import connections, transaction
 from django.db.utils import OperationalError
 
 from ai_service.ai_client import AiClient, AiError
+from ai_service.providers import LlmRouter, LlmError
 from ai_service.models import AiClassificationLog, AiClassificationRaw
 from ai_service.schema import (
     AiClassificationParseError,
@@ -253,8 +254,8 @@ def _log_classification(
     return log
 
 
-def classify_jobs(request: ClassifyRequest, ai_client: AiClient) -> list[ClassifyJobResult]:
-    """Classify one-to-many jobs via the LLM.
+def classify_jobs(request: ClassifyRequest, ai_client: Any = None) -> list[ClassifyJobResult]:
+    """Classify one-to-many jobs via the LLM router (Gemini with Groq fallback).
 
     Each job is classified independently: a failure or uncategorization for one
     job does not affect the others. Per-job errors are surfaced as `error` on
@@ -266,7 +267,7 @@ def classify_jobs(request: ClassifyRequest, ai_client: AiClient) -> list[Classif
     """
     sectors, rules = _sector_list_for_prompt()
     system = _build_system_prompt(sectors, rules)
-    model = ai_client.model
+    default_model = getattr(ai_client, "model", "router") if ai_client else "classification"
 
     results: list[ClassifyJobResult] = []
 
@@ -304,14 +305,28 @@ def classify_jobs(request: ClassifyRequest, ai_client: AiClient) -> list[Classif
         parsed: dict[str, Any] | None = None
         response_payload: dict[str, Any] | None = None
         error: str | None = None
+        model = default_model
 
         try:
             user = _build_user_prompt(item)
-            request_payload = _build_request_payload(system, user, model)
-            parsed, response_payload = ai_client.chat_json_with_raw(system, user, timeout_seconds=600)
+            if ai_client is not None:
+                request_payload = _build_request_payload(system, user, model)
+                parsed, response_payload = ai_client.chat_json_with_raw(system, user, timeout_seconds=600)
+            else:
+                llm_resp = LlmRouter.execute_chat_json(
+                    service_name="classification",
+                    system_prompt=system,
+                    user_prompt=user,
+                    timeout_seconds=600,
+                )
+                model = f"{llm_resp.provider}/{llm_resp.model}"
+                request_payload = _build_request_payload(system, user, model)
+                parsed = llm_resp.parsed_json
+                response_payload = llm_resp.raw_response
+
             parsed = parse_ai_classification(parsed)
 
-        except AiError as exc:
+        except (AiError, LlmError) as exc:
             logger.warning("AI failed for job %s: %s", item.job_id, exc)
             error = str(exc)
 
