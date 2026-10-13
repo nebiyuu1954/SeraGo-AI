@@ -192,6 +192,8 @@ def _log_classification(
     """
     if response_payload is None:
         response_payload = {}
+    if request_payload is None:
+        request_payload = {}
 
     usage = parse_provider_usage(response_payload)
 
@@ -303,14 +305,15 @@ def classify_jobs(request: ClassifyRequest, ai_client: Any = None) -> list[Class
 
         t0 = time.perf_counter()
         parsed: dict[str, Any] | None = None
+        request_payload: dict[str, Any] | None = None
         response_payload: dict[str, Any] | None = None
         error: str | None = None
         model = default_model
 
         try:
             user = _build_user_prompt(item)
+            request_payload = _build_request_payload(system, user, model)
             if ai_client is not None:
-                request_payload = _build_request_payload(system, user, model)
                 parsed, response_payload = ai_client.chat_json_with_raw(system, user, timeout_seconds=600)
             else:
                 llm_resp = LlmRouter.execute_chat_json(
@@ -320,7 +323,7 @@ def classify_jobs(request: ClassifyRequest, ai_client: Any = None) -> list[Class
                     timeout_seconds=600,
                 )
                 model = f"{llm_resp.provider}/{llm_resp.model}"
-                request_payload = _build_request_payload(system, user, model)
+                request_payload["model"] = model
                 parsed = llm_resp.parsed_json
                 response_payload = llm_resp.raw_response
 
