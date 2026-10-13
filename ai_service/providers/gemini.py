@@ -35,7 +35,7 @@ class GeminiProvider(BaseLlmProvider):
             )
 
         self._model = (
-            model or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+            model or os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
         ).strip()
         self._session = requests.Session()
         self._session.headers.update({"Content-Type": "application/json"})
