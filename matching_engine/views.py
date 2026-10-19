@@ -20,6 +20,7 @@ Talent-initiated refresh (the "Run AI matching" button on the For You page):
 Read endpoints used by the .NET backend to annotate its pages:
       POST /api/matching/scores/batch                — For You feed scores
       POST /api/matching/application-scores/batch    — applications page scores
+      POST /api/matching/job-matches                 — talents matched to one job
       GET  /api/matching/health                      — health check
 
 All webhook/batch endpoints require the X-Api-Key header.
@@ -860,6 +861,63 @@ def scores_batch(request):
             }
 
     return JsonResponse({"userId": user_id, "count": len(scores), "scores": scores})
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  READ: Reverse lookup — talents matched to one job (job DMs)
+# ══════════════════════════════════════════════════════════════════════
+
+@extend_schema(
+    tags=["Scores"],
+    summary="Talents matched to one job (reverse lookup)",
+    description=(
+        "Returns the talent userIds whose stored 0-100 score for one job is "
+        "at or above `threshold`, best first. Used by the .NET backend to "
+        "pick AI-matched talents for personalized Telegram job DMs. Requires "
+        "X-Api-Key."
+    ),
+    responses={200: OpenApiResponse(description="Ranked list of matched talents")},
+)
+@csrf_exempt
+@require_POST
+def job_matches(request):
+    """Reverse lookup: which talents scored >= threshold on one job (best first)."""
+    from uuid import UUID
+
+    body = _parse_json_body(request)
+    raw_job_id = body.get("jobId")
+    if not raw_job_id:
+        return JsonResponse({"error": "jobId is required"}, status=400)
+
+    try:
+        job_uuid = UUID(str(raw_job_id))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "jobId must be a UUID"}, status=400)
+
+    try:
+        threshold = float(body.get("threshold", 0))
+    except (ValueError, TypeError):
+        threshold = 0.0
+
+    try:
+        limit = int(body.get("limit", 200))
+    except (ValueError, TypeError):
+        limit = 200
+    limit = max(1, min(limit, 500))
+
+    rows = (
+        TalentJobScore.objects
+        .filter(job_id=job_uuid, score__gte=threshold)
+        .order_by("-score")[:limit]
+    )
+
+    matches = [{"userId": r.talent_user_id, "score": r.score} for r in rows]
+    return JsonResponse({
+        "jobId": str(job_uuid),
+        "threshold": threshold,
+        "count": len(matches),
+        "matches": matches,
+    })
 
 
 # ══════════════════════════════════════════════════════════════════════

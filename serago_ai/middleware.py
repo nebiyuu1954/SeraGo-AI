@@ -32,6 +32,8 @@ _PROTECTED_PREFIXES = (
     # Batch read endpoints used by .NET to annotate pages
     "/api/matching/scores/",
     "/api/matching/application-scores/",
+    # Reverse lookup — talents matched to one job (personalized job DMs)
+    "/api/matching/job-matches",
     # Resume parsing — called by .NET with a presigned R2 URL for a private
     # resume. Without this entry the endpoint would be OPEN to the internet.
     "/api/matching/parse-resume",
