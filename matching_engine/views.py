@@ -1014,6 +1014,128 @@ def parse_resume(request):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  SIMILAR JOBS: Vector cosine similarity between target job & candidates
+# ══════════════════════════════════════════════════════════════════════
+
+@extend_schema(
+    tags=["Similar Jobs"],
+    summary="Compute vector similarities between a target job and candidate jobs",
+    description="Given a target job and candidate jobs in the same sector, returns candidate jobIds ordered by cosine similarity.",
+    responses={200: OpenApiResponse(description="List of similar job matches with scores")},
+)
+@csrf_exempt
+@require_POST
+def similar_jobs(request):
+    """Compute cosine similarities between a target job and candidate jobs."""
+    body = _parse_json_body(request)
+    target_dict = body.get("targetJob") or {}
+    candidates_dict = body.get("candidateJobs") or []
+
+    target_id_raw = target_dict.get("jobId")
+    if not target_id_raw or not candidates_dict:
+        return JsonResponse({"jobId": str(target_id_raw or ""), "matches": []})
+
+    try:
+        from uuid import UUID
+        target_uuid = UUID(str(target_id_raw))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "invalid target jobId"}, status=400)
+
+    from .services.scoring import build_job_text, encode_text, encode_texts, text_hash
+    import math
+
+    # 1. Target job embedding
+    target_obj = _job_data_from_dict(target_dict)
+    target_text = build_job_text(target_obj)
+    target_hash = text_hash(target_text)
+
+    target_vec_row = JobVector.objects.filter(job_id=target_uuid).first()
+    if target_vec_row and target_vec_row.job_data_hash == target_hash:
+        target_embedding = target_vec_row.embedding
+    else:
+        target_embedding = encode_text(target_text)
+        JobVector.objects.update_or_create(
+            job_id=target_uuid,
+            defaults={"embedding": target_embedding, "job_data_hash": target_hash},
+        )
+
+    # 2. Candidate jobs embeddings
+    candidate_items = []
+    for c in candidates_dict:
+        c_id = c.get("jobId")
+        if not c_id:
+            continue
+        try:
+            c_uuid = UUID(str(c_id))
+            if c_uuid == target_uuid:
+                continue
+            c_obj = _job_data_from_dict(c)
+            c_text = build_job_text(c_obj)
+            c_hash = text_hash(c_text)
+            candidate_items.append({
+                "uuid": c_uuid,
+                "text": c_text,
+                "hash": c_hash,
+                "embedding": None,
+            })
+        except (ValueError, TypeError):
+            continue
+
+    if not candidate_items:
+        return JsonResponse({"jobId": str(target_uuid), "matches": []})
+
+    # Preload stored vectors for candidates
+    c_uuids = [item["uuid"] for item in candidate_items]
+    stored_vectors = {
+        row.job_id: row
+        for row in JobVector.objects.filter(job_id__in=c_uuids)
+    }
+
+    needs_encode = []
+    for item in candidate_items:
+        stored = stored_vectors.get(item["uuid"])
+        if stored and stored.job_data_hash == item["hash"]:
+            item["embedding"] = stored.embedding
+        else:
+            needs_encode.append(item)
+
+    if needs_encode:
+        encoded_list = encode_texts([it["text"] for it in needs_encode])
+        for it, emb in zip(needs_encode, encoded_list):
+            it["embedding"] = emb
+            JobVector.objects.update_or_create(
+                job_id=it["uuid"],
+                defaults={"embedding": emb, "job_data_hash": it["hash"]},
+            )
+
+    # 3. Compute cosine similarity for each candidate
+    def _cosine_sim(a: list[float], b: list[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = math.sqrt(sum(x * x for x in a))
+        norm_b = math.sqrt(sum(y * y for y in b))
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return max(0.0, min(1.0, dot / (norm_a * norm_b)))
+
+    scored_matches = []
+    for item in candidate_items:
+        if item["embedding"]:
+            score = _cosine_sim(target_embedding, item["embedding"])
+            scored_matches.append({
+                "jobId": str(item["uuid"]),
+                "score": round(score, 4),
+            })
+
+    scored_matches.sort(key=lambda x: x["score"], reverse=True)
+
+    return JsonResponse({
+        "jobId": str(target_uuid),
+        "count": len(scored_matches),
+        "matches": scored_matches,
+    })
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  READ: Health check
 # ══════════════════════════════════════════════════════════════════════
 

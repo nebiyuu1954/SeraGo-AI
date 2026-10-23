@@ -33,6 +33,9 @@ urlpatterns = [
     # Resume → profile fields (called by .NET with a presigned R2 URL)
     path("parse-resume", views.parse_resume, name="parse-resume"),
 
+    # Similar jobs vector similarity
+    path("similar-jobs", views.similar_jobs, name="similar-jobs"),
+
     # Health check
     path("health", views.health, name="health"),
 ]
